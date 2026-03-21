@@ -1,0 +1,3 @@
+easy-equities-client
+pandas
+python-dotenv
