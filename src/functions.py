@@ -34,7 +34,7 @@ def load_allocations(free_cash):
     total = 0.0
 
     with open("allocations.csv", newline='', encoding='utf-8-sig') as csvfile:
-        reader = csv.DictReader(csvfile, delimiter=';')
+        reader = csv.DictReader(csvfile, delimiter='\t')
         for row in reader:
             ticker = row["ticker"].strip()
             proportion = float(row["proportion"].replace(',', '.'))
