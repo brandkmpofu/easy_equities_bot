@@ -9,8 +9,9 @@ def get_free_cash(client, account_id):
     Returns:
         float: The amount of free cash available to invest.
     """
-    balance = client.accounts.get_cash_balance(account_id)
-    free_cash = balance["free"]
+    free_cash = float(next(item['Value'] for item in client.accounts.valuations(account_id)['FundSummaryItems']
+    if item['Label'] == 'Your Funds to Invest').replace('R', '').replace(',', '').strip())
+
     return free_cash
 
 
@@ -27,51 +28,39 @@ def load_allocations(free_cash):
     Raises:
         ValueError: If total allocation proportions do not sum to 1.0.
     """
+
+    import csv
     allocations = {}
     total = 0.0
 
-    with open(ALLOC_FILE, newline='') as csvfile:
-        reader = csv.DictReader(csvfile)
+    with open("allocations.csv", newline='', encoding='utf-8-sig') as csvfile:
+        reader = csv.DictReader(csvfile, delimiter=';')
         for row in reader:
             ticker = row["ticker"].strip()
-            proportion = float(row["proportion"])
+            proportion = float(row["proportion"].replace(',', '.'))
+            contract_code = row["contract_code"].strip()
+            ticker_name  = row["name"].strip()
 
             allocations[ticker] = proportion
+            allocations[ticker] = {
+            "contract_code": contract_code,
+            "ticker_name": ticker_name,
+            "proportion": proportion
+            }
             total += proportion
 
     if not abs(total - 1.0) < 1e-6:
         raise ValueError(f"Total allocation proportions must sum to 1. Found: {total}")
 
     allocation_amounts = {
-        ticker: round(proportion * free_cash, 2)
-        for ticker, proportion in allocations.items()
+    ticker: {
+        "amount": round(details["proportion"] * free_cash, 2),
+        "contract_code": details["contract_code"],
+        "ticker_name": details["ticker_name"]
     }
-
+       for ticker, details in allocations.items()
+    }
     return allocation_amounts
-
-
-def get_instrument_id(client, ticker):
-    """
-    Retrieve the instrument ID for a given ticker symbol.
-
-    Args:
-        client (EasyEquitiesClient): Authenticated EasyEquities client instance.
-        ticker (str): Ticker symbol to search for.
-
-    Returns:
-        str: The instrument ID corresponding to the ticker.
-
-    Raises:
-        Exception: If no matching instrument is found.
-    """
-    results = client.instruments.search(ticker)
-    
-    for r in results:
-        if ticker in r["symbol"]:
-            instrument_id = r["instrument_id"]
-            return instrument_id
-    
-    raise Exception(f"{ticker} not found")
 
 
 def buy_etf(client, account_id, instrument_id, amount):
@@ -85,16 +74,51 @@ def buy_etf(client, account_id, instrument_id, amount):
         amount (float): Amount in currency (ZAR) to invest.
 
     Returns:
-        dict: Response from the order placement API.
+       dict: Response from the order placement API.
     """
-    order = client.orders.place_order(
-        account_id=account_id,
-        instrument_id=instrument_id,
-        order_type="MARKET",
-        side="BUY",
-        amount=amount
+    
+    from bs4 import BeautifulSoup
+    
+    page = client.session.get(
+    "https://platform.easyequities.io/ValueAllocation/Buy",
+    params={
+        "contractCode": "EQU.ZA.STX40",
+        "tradingCurrencyId": 2}
     )
-    return order
+
+    soup = BeautifulSoup(page.text, "html.parser")
+    csrf = soup.find("input", {"name": "__RequestVerificationToken"})["value"]
+    token = soup.find("input", {"name": "Token"})["value"]
+    anti = soup.find("input", {"name": "AntiTamperingToken"})["value"]
+    isin = soup.find("input", {"name": "TradeInstrument.ISINCode"})["value"]
+    contract = soup.find("input", {"name": "TradeInstrument.ContractCode"})["value"]
+
+    payload = {
+    "__RequestVerificationToken": csrf,
+    "Token": token,
+    "TradeType": "Buy",
+
+    "TradeInstrument.ISINCode": isin,
+    "TradeInstrument.ContractCode": contract,
+    "TradeInstrument.IsInstrumentUnitTrust": "False",
+
+    "AntiTamperingToken": anti,
+
+    "TradeValue": str(amount),
+
+    "IsLimitOrderAvailable": "True",
+    "IsPlacingLimitOrder": "False",
+
+    "TradeBreakdown.NetAmountDue": str(amount),
+    "HasSufficientFundsToTrade": "True"
+    }
+
+    response = client.session.post(
+    "https://platform.easyequities.io/ValueAllocation/BuyInstruction",
+    data=payload
+    )
+    
+    return response
 
 
 def send_email(body, today, EMAIL_SENDER, EMAIL_RECEIVER, EMAIL_PASSWORD):
@@ -115,6 +139,7 @@ def send_email(body, today, EMAIL_SENDER, EMAIL_RECEIVER, EMAIL_PASSWORD):
     from email.mime.text import MIMEText
 
     subject = f'Easy Equities Buy Orders for {today}'
+    body = "\n".join(body)
     msg = MIMEText(body)
     msg["Subject"] = subject
     msg["From"] = EMAIL_SENDER
