@@ -15,19 +15,19 @@ def get_free_cash(client, account_id):
     return free_cash
 
 
-def load_allocations(free_cash, file_path="allocations.csv"):
+def load_allocations(free_cash, file_path="allocations.xlsx", sheet_name=0):
     import pandas as pd
+    import openpyxl
 
-    # Read CSV with flexible parsing
+    # Read Excel
     try:
-        df = pd.read_csv(
+        df = pd.read_excel(
             file_path,
-            sep=None,              # auto-detect delimiter
-            engine="python",
-            encoding="utf-8-sig"   # handles BOM
+            sheet_name=sheet_name,
+            engine="openpyxl"   # standard for .xlsx
         )
     except Exception as e:
-        raise ValueError(f"Failed to read CSV: {e}")
+        raise ValueError(f"Failed to read Excel file: {e}")
 
     # Normalize column names
     df.columns = df.columns.str.strip().str.lower()
@@ -41,7 +41,7 @@ def load_allocations(free_cash, file_path="allocations.csv"):
     try:
         df["ticker"] = df["ticker"].astype(str).str.strip()
         df["name"] = df["name"].astype(str).str.strip()
-        df["contract_code"] = df["contract_code"].astype(str).str.strip()
+        df["contract_code"] = (df["contract_code"].astype(str).str.strip().str.strip("'\""))
 
         # Handle comma/dot decimals safely
         df["proportion"] = (
@@ -68,7 +68,7 @@ def load_allocations(free_cash, file_path="allocations.csv"):
     # Compute allocation amounts
     df["amount"] = (df["proportion"] * free_cash).round(2)
 
-    # Convert to required output format
+    # Convert to required output format (same as before)
     allocation_amounts = {
         row["ticker"]: {
             "amount": row["amount"],
@@ -81,7 +81,7 @@ def load_allocations(free_cash, file_path="allocations.csv"):
     return allocation_amounts
 
 
-def buy_etf(client, account_id, instrument_id, amount):
+def buy_etf(client, account_id, contract_code, amount):
     """
     Place a market buy order for a specified ETF.
 
@@ -100,7 +100,7 @@ def buy_etf(client, account_id, instrument_id, amount):
     page = client.session.get(
     "https://platform.easyequities.io/ValueAllocation/Buy",
     params={
-        "contractCode": "EQU.ZA.STX40",
+        "contractCode": f"{contract_code}",
         "tradingCurrencyId": 2}
     )
 
@@ -109,7 +109,6 @@ def buy_etf(client, account_id, instrument_id, amount):
     token = soup.find("input", {"name": "Token"})["value"]
     anti = soup.find("input", {"name": "AntiTamperingToken"})["value"]
     isin = soup.find("input", {"name": "TradeInstrument.ISINCode"})["value"]
-    contract = soup.find("input", {"name": "TradeInstrument.ContractCode"})["value"]
 
     payload = {
     "__RequestVerificationToken": csrf,
@@ -117,7 +116,7 @@ def buy_etf(client, account_id, instrument_id, amount):
     "TradeType": "Buy",
 
     "TradeInstrument.ISINCode": isin,
-    "TradeInstrument.ContractCode": contract,
+    "TradeInstrument.ContractCode": contract_code,
     "TradeInstrument.IsInstrumentUnitTrust": "False",
 
     "AntiTamperingToken": anti,

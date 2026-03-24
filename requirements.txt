@@ -1,3 +1,4 @@
 easy-equities-client
 pandas
 python-dotenv
+openpyxl

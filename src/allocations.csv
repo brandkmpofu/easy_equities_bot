@@ -1,6 +1,0 @@
-contract_code	ticker	proportion	name
-"""EQU.ZA.STX500"""	STX500	0,2	"""Satrix S&P 500 ETF"""
-"""EC10.EC.EC10"""	EC10	0,2	"""EasyCrypto 10"""
-"""EQU.ZA.NEWSLV"""	NEWSLV	0,2	"""New Wave Silver ETN"""
-"""EQU.ZA.NGPLT"""	NGPLT	0,2	"""NewPlat ETF"""
-"""EQU.ZA.STX40"""	STX40	0,2	"""Satrix 40 ETF"""
