@@ -15,51 +15,69 @@ def get_free_cash(client, account_id):
     return free_cash
 
 
-def load_allocations(free_cash):
-    """
-    Load allocation proportions from CSV and convert to monetary amounts.
+def load_allocations(free_cash, file_path="allocations.csv"):
+    import pandas as pd
 
-    Args:
-        free_cash (float): Total available cash to allocate across tickers.
+    # Read CSV with flexible parsing
+    try:
+        df = pd.read_csv(
+            file_path,
+            sep=None,              # auto-detect delimiter
+            engine="python",
+            encoding="utf-8-sig"   # handles BOM
+        )
+    except Exception as e:
+        raise ValueError(f"Failed to read CSV: {e}")
 
-    Returns:
-        dict: Dictionary mapping ticker symbols (str) to allocation amounts (float).
+    # Normalize column names
+    df.columns = df.columns.str.strip().str.lower()
 
-    Raises:
-        ValueError: If total allocation proportions do not sum to 1.0.
-    """
+    required_cols = {"ticker", "proportion", "contract_code", "name"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
 
-    import csv
-    allocations = {}
-    total = 0.0
+    # Clean and validate data
+    try:
+        df["ticker"] = df["ticker"].astype(str).str.strip()
+        df["name"] = df["name"].astype(str).str.strip()
+        df["contract_code"] = df["contract_code"].astype(str).str.strip()
 
-    with open("allocations.csv", newline='', encoding='utf-8-sig') as csvfile:
-        reader = csv.DictReader(csvfile, delimiter='\t')
-        for row in reader:
-            ticker = row["ticker"].strip()
-            proportion = float(row["proportion"].replace(',', '.'))
-            contract_code = row["contract_code"].strip()
-            ticker_name  = row["name"].strip()
+        # Handle comma/dot decimals safely
+        df["proportion"] = (
+            df["proportion"]
+            .astype(str)
+            .str.replace(",", ".", regex=False)
+            .astype(float)
+        )
 
-            allocations[ticker] = proportion
-            allocations[ticker] = {
-            "contract_code": contract_code,
-            "ticker_name": ticker_name,
-            "proportion": proportion
-            }
-            total += proportion
+    except Exception as e:
+        raise ValueError(f"Data cleaning error: {e}")
 
+    # Validate data
+    if (df["proportion"] < 0).any():
+        raise ValueError("Proportions cannot be negative")
+
+    if df["ticker"].eq("").any():
+        raise ValueError("Empty ticker found")
+
+    total = df["proportion"].sum()
     if not abs(total - 1.0) < 1e-6:
         raise ValueError(f"Total allocation proportions must sum to 1. Found: {total}")
 
+    # Compute allocation amounts
+    df["amount"] = (df["proportion"] * free_cash).round(2)
+
+    # Convert to required output format
     allocation_amounts = {
-    ticker: {
-        "amount": round(details["proportion"] * free_cash, 2),
-        "contract_code": details["contract_code"],
-        "ticker_name": details["ticker_name"]
+        row["ticker"]: {
+            "amount": row["amount"],
+            "contract_code": row["contract_code"],
+            "ticker_name": row["name"]
+        }
+        for _, row in df.iterrows()
     }
-       for ticker, details in allocations.items()
-    }
+
     return allocation_amounts
 
 
