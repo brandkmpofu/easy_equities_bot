@@ -10,7 +10,7 @@ def get_free_cash(client, account_id):
         float: The amount of free cash available to invest.
     """
     free_cash = float(next(item['Value'] for item in client.accounts.valuations(account_id)['FundSummaryItems']
-    if item['Label'] == 'Your Funds to Invest').replace('R', '').replace(',', '').strip())
+    if item['Label'] == 'Your Funds to Invest').replace('R', '').replace(',', '').replace(' ', '').strip())
 
     return free_cash
 
