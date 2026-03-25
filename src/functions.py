@@ -94,15 +94,10 @@ def buy_etf(client, account_id, contract_code, amount):
     Returns:
        dict: Response from the order placement API.
     """
-    
     from bs4 import BeautifulSoup
+    from easy_equities_client.clients import EasyEquitiesClient
     
-    page = client.session.get(
-    "https://platform.easyequities.io/ValueAllocation/Buy",
-    params={
-        "contractCode": f"{contract_code}",
-        "tradingCurrencyId": 2}
-    )
+    page = client.session.get(f"https://platform.easyequities.io/ValueAllocation/Buy?contractCode={contract_code}&tradingCurrencyId=2")
 
     soup = BeautifulSoup(page.text, "html.parser")
     csrf = soup.find("input", {"name": "__RequestVerificationToken"})["value"]
