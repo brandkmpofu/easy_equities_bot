@@ -29,3 +29,17 @@ A simple Python-based Jupyter project that automates **buy orders** on Easy Equi
 ```bash
 git clone git@github.com:yourusername/easy-equities-auto-buyer.git
 cd easy-equities-auto-buyer
+
+##Create .env file
+within the /easy_equities_bot/ folder create a .env  file.
+in the file copy the below variables and insert the respective values.
+
+EE_USERNAME=
+EE_PASSWORD=
+MIN_TRADE=10
+ZAR_TRADING_ACCOUNT_ID=
+RA_TRADING_ACCOUNT_ID=
+TFSA_TRADING_ACCOUNT_ID=
+EMAIL_SENDER=
+EMAIL_PASSWORD=   ##this is the app password not the normal gmail password
+EMAIL_RECEIVER=
