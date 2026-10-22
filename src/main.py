@@ -1,5 +1,5 @@
 """
-Cron entrypoint: log in, split free cash per allocations.xlsx, place buy
+Cron entrypoint: log in, split free cash per allocations.csv, place buy
 orders and email a summary.
 
     python src/main.py                    # place orders

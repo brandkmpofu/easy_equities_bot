@@ -3,4 +3,3 @@ beautifulsoup4
 requests
 urllib3>=1.26
 python-dotenv
-openpyxl

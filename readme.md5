@@ -47,7 +47,7 @@ EMAIL_RECEIVER=```
 ## ⏰ Running via cron
 
 Use `src/main.py` (not the notebook) on the server. It needs no Jupyter, resolves
-`.env` and `allocations.xlsx` relative to the repo (cron starts in `$HOME`), times out
+`.env` and `allocations.csv` relative to the repo (cron starts in `$HOME`), times out
 hung requests, never runs twice at once, emails you if the run fails, and exits
 non-zero when an order fails.
 
@@ -80,4 +80,3 @@ EQU.ZA.STX500,STX500,0.45,Satrix S&P 500 ETF
 ```
 
 `proportion` values must add up to 1. The bot refuses to run (and emails you) if they don't.
-The old `allocations.xlsx` is only used if no CSV exists.
