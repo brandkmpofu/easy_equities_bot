@@ -1,4 +1,108 @@
-def login(username, password, base_url="https://platform.easyequities.io"):
+import os
+import re
+import smtplib
+from decimal import Decimal, ROUND_DOWN
+from email.mime.text import MIMEText
+from urllib.parse import urljoin
+
+import openpyxl
+from bs4 import BeautifulSoup
+from easy_equities_client.clients import EasyEquitiesClient
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+BASE_URL = "https://platform.easyequities.io"
+DEFAULT_ALLOCATIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allocations.xlsx")
+
+# A real browser User-Agent is required — the default python-requests UA
+# is now rejected by CloudFront with a 403 before the request even reaches
+# the application.
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+# Seconds before any single HTTP request is abandoned, so a hung connection
+# can never leave the cron job running forever.
+REQUEST_TIMEOUT = 30
+
+
+class _TimeoutAdapter(HTTPAdapter):
+    """HTTPAdapter that applies a default timeout to every request."""
+
+    def __init__(self, *args, timeout=REQUEST_TIMEOUT, **kwargs):
+        self.timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.timeout
+        return super().send(request, **kwargs)
+
+
+def _configure_session(session):
+    """
+    Add browser headers, timeouts and retries to a requests session.
+
+    Only GETs are retried on read errors / 5xx responses. POSTs (logins and
+    buy orders) are never re-sent once they reach the server, so a flaky
+    connection can't place the same order twice.
+    """
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        status=3,
+        backoff_factor=2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = _TimeoutAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,*/*;q=0.8"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+    )
+
+
+def _form_fields(form):
+    """
+    Collect a form's values into a POST payload the way a browser would:
+    unchecked checkboxes/radios and submit buttons are left out, and
+    <select>/<textarea> values are included.
+    """
+    data = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if not name:
+            continue
+        kind = (inp.get("type") or "text").lower()
+        if kind in ("submit", "button", "image", "reset", "file"):
+            continue
+        if kind in ("checkbox", "radio") and not inp.has_attr("checked"):
+            continue
+        # ASP.NET renders checkboxes as <input checkbox value=true> followed
+        # by <input hidden value=false>; keep the first (checked) value.
+        data.setdefault(name, inp.get("value", ""))
+    for sel in form.find_all("select"):
+        if sel.get("name"):
+            opt = sel.find("option", selected=True) or sel.find("option")
+            data.setdefault(sel["name"], opt.get("value", opt.get_text(strip=True)) if opt else "")
+    for ta in form.find_all("textarea"):
+        if ta.get("name"):
+            data.setdefault(ta["name"], ta.get_text())
+    return data
+
+
+def login(username, password, base_url=BASE_URL):
     """
     Log in to EasyEquities and return an authenticated EasyEquitiesClient.
 
@@ -20,38 +124,9 @@ def login(username, password, base_url="https://platform.easyequities.io"):
     Raises:
         Exception: if the login flow fails (bad credentials, blocked, etc.).
     """
-    from urllib.parse import urljoin
-    from bs4 import BeautifulSoup
-    from easy_equities_client.clients import EasyEquitiesClient
-
-    # A real browser User-Agent is required — the default python-requests UA
-    # is now rejected by CloudFront with a 403 before the request even reaches
-    # the application.
-    USER_AGENT = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    )
-
-    def _form_fields(form):
-        """Collect a form's hidden/named input values into a POST payload."""
-        return {
-            inp.get("name"): inp.get("value", "")
-            for inp in form.find_all("input")
-            if inp.get("name")
-        }
-
     client = EasyEquitiesClient(base_url=base_url)
     session = client.session
-    session.headers.update(
-        {
-            "User-Agent": USER_AGENT,
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                "image/avif,image/webp,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-    )
+    _configure_session(session)
 
     # 1. Follow the redirect chain to the identity provider's login form.
     #    platform.easyequities.io -> /Account/LogInViaIdp -> identity.openeasy.io
@@ -112,17 +187,27 @@ def get_free_cash(client, account_id):
     Returns:
         float: The amount of free cash available to invest.
     """
-    free_cash = float(next(item['Value'] for item in client.accounts.valuations(account_id)['FundSummaryItems']
-    if item['Label'] == 'Your Funds to Invest').replace('R', '').replace(',', '').replace(' ', '').strip())
-
-    return free_cash
+    items = client.accounts.valuations(account_id)["FundSummaryItems"]
+    value = next(
+        (item["Value"] for item in items if item["Label"] == "Your Funds to Invest"), None
+    )
+    if value is None:
+        raise Exception(
+            "'Your Funds to Invest' not found in account valuations. "
+            f"Labels returned: {[item['Label'] for item in items]}"
+        )
+    # e.g. "R1 234,56" / "R1,234.56" -> 1234.56
+    cleaned = re.sub(r"[^\d.,-]", "", value)
+    if "," in cleaned and "." not in cleaned:
+        cleaned = cleaned.replace(",", ".")
+    return float(cleaned.replace(",", ""))
 
 
 def list_accounts(client):
     """
     List all trading accounts on the profile with their IDs.
 
-    Handy for discovering the account IDs to put in your `_env` file.
+    Handy for discovering the account IDs to put in your `.env` file.
 
     Args:
         client (EasyEquitiesClient): Authenticated EasyEquities client instance.
@@ -160,75 +245,97 @@ def get_holdings_summary(client, account_id):
     ]
 
 
-def load_allocations(free_cash, file_path="allocations.xlsx", sheet_name=0):
-    import pandas as pd
-    import openpyxl
+def load_allocations(free_cash, file_path=DEFAULT_ALLOCATIONS, sheet_name=0):
+    """
+    Split free cash across the tickers in the allocations spreadsheet.
 
-    # Read Excel
+    Amounts are rounded *down* to the cent so their total can never exceed
+    the available cash (rounding to nearest could make the last order fail
+    for insufficient funds).
+
+    Returns:
+        dict: {ticker: {"amount", "contract_code", "ticker_name"}}
+    """
     try:
-        df = pd.read_excel(
-            file_path,
-            sheet_name=sheet_name,
-            engine="openpyxl"   # standard for .xlsx
-        )
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        ws = wb.worksheets[sheet_name] if isinstance(sheet_name, int) else wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
     except Exception as e:
-        raise ValueError(f"Failed to read Excel file: {e}")
+        raise ValueError(f"Failed to read Excel file {file_path}: {e}")
 
-    # Normalize column names
-    df.columns = df.columns.str.strip().str.lower()
+    if not rows:
+        raise ValueError(f"{file_path} is empty")
 
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
     required_cols = {"ticker", "proportion", "contract_code", "name"}
-    missing = required_cols - set(df.columns)
+    missing = required_cols - set(header)
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
+    col = {name: header.index(name) for name in required_cols}
 
-    # Clean and validate data
-    try:
-        df["ticker"] = df["ticker"].astype(str).str.strip()
-        df["name"] = df["name"].astype(str).str.strip()
-        df["contract_code"] = (df["contract_code"].astype(str).str.strip().str.strip("'\""))
+    def _text(value):
+        return "" if value is None else str(value).strip().strip("'\"").strip()
 
-        # Handle comma/dot decimals safely
-        df["proportion"] = (
-            df["proportion"]
-            .astype(str)
-            .str.replace(",", ".", regex=False)
-            .astype(float)
-        )
+    cash = Decimal(str(free_cash))
+    allocation_amounts = {}
+    total = Decimal(0)
+    for line_no, row in enumerate(rows[1:], start=2):
+        if row is None or all(c is None or str(c).strip() == "" for c in row):
+            continue  # skip blank rows
+        ticker = _text(row[col["ticker"]])
+        if not ticker:
+            raise ValueError(f"Empty ticker found on row {line_no}")
+        if ticker in allocation_amounts:
+            raise ValueError(f"Duplicate ticker {ticker} on row {line_no}")
+        try:
+            # Handle comma/dot decimals safely
+            proportion = Decimal(str(row[col["proportion"]]).strip().replace(",", "."))
+        except Exception:
+            raise ValueError(f"Invalid proportion for {ticker} on row {line_no}")
+        if proportion < 0:
+            raise ValueError("Proportions cannot be negative")
+        total += proportion
 
-    except Exception as e:
-        raise ValueError(f"Data cleaning error: {e}")
+        allocation_amounts[ticker] = {
+            "amount": float((proportion * cash).quantize(Decimal("0.01"), rounding=ROUND_DOWN)),
+            "contract_code": _text(row[col["contract_code"]]),
+            "ticker_name": _text(row[col["name"]]),
+        }
 
-    # Validate data
-    if (df["proportion"] < 0).any():
-        raise ValueError("Proportions cannot be negative")
-
-    if df["ticker"].eq("").any():
-        raise ValueError("Empty ticker found")
-
-    total = df["proportion"].sum()
-    if not abs(total - 1.0) < 1e-6:
+    if abs(total - 1) > Decimal("0.000001"):
         raise ValueError(f"Total allocation proportions must sum to 1. Found: {total}")
 
-    # Compute allocation amounts
-    df["amount"] = (df["proportion"] * free_cash).round(2)
-
-    # Convert to required output format (same as before)
-    allocation_amounts = {
-        row["ticker"]: {
-            "amount": row["amount"],
-            "contract_code": row["contract_code"],
-            "ticker_name": row["name"]
-        }
-        for _, row in df.iterrows()
-    }
-
     return allocation_amounts
+
+
+def get_buy_form(client, contract_code, trading_currency_id=2):
+    """
+    Fetch the buy page for an instrument and return (response, form_fields, form_action).
+
+    Useful on its own for diagnosing an instrument whose orders don't go
+    through: it shows every field the platform expects without trading.
+    """
+    page = client.session.get(
+        f"{client.base_url}/ValueAllocation/Buy",
+        params={"contractCode": contract_code, "tradingCurrencyId": trading_currency_id},
+    )
+    soup = BeautifulSoup(page.text, "html.parser")
+    token = soup.find("input", {"name": "AntiTamperingToken"})
+    form = token.find_parent("form") if token else None
+    if form is None:
+        return page, {}, None
+    return page, _form_fields(form), form.get("action")
 
 
 def buy_etf(client, account_id, contract_code, amount, trading_currency_id=2):
     """
     Place a market buy order for a specified ETF.
+
+    The payload starts from every field on the instrument's own buy form, so
+    instrument-specific hidden fields (e.g. the unit-trust flag on actively
+    managed ETFs) are sent with the values the platform rendered, rather than
+    hardcoded values that only suit plain ETFs.
 
     Args:
         client (EasyEquitiesClient): Authenticated EasyEquities client instance.
@@ -238,88 +345,101 @@ def buy_etf(client, account_id, contract_code, amount, trading_currency_id=2):
         trading_currency_id (int): Trading currency id (2 = ZAR, 3 = TFSA, 10 = USD, ...).
 
     Returns:
-        requests.Response: Response from the order placement API.
+        requests.Response: Response from the order placement API. Pass it to
+        ``check_order`` to find out whether the order was accepted.
     """
-    from bs4 import BeautifulSoup
-
     # Make sure the intended account is the currently-selected one before we
     # read the buy page (the buy page is scoped to the active account).
     client.accounts._switch_account(account_id)
 
-    page = client.session.get(
-        "https://platform.easyequities.io/ValueAllocation/Buy"
-        f"?contractCode={contract_code}&tradingCurrencyId={trading_currency_id}"
-    )
+    page, fields, _ = get_buy_form(client, contract_code, trading_currency_id)
 
-    soup = BeautifulSoup(page.text, "html.parser")
-
-    def _field(name):
-        el = soup.find("input", {"name": name})
-        if el is None or el.get("value") is None:
+    for name in ("__RequestVerificationToken", "Token", "AntiTamperingToken", "TradeInstrument.ISINCode"):
+        if not fields.get(name):
             raise Exception(
                 f"Could not find '{name}' on the buy page for {contract_code} "
                 f"(status {page.status_code}). The buy page may have changed, "
                 f"or the instrument/currency is not tradable on this account."
             )
-        return el["value"]
 
-    csrf = _field("__RequestVerificationToken")
-    token = _field("Token")
-    anti = _field("AntiTamperingToken")
-    isin = _field("TradeInstrument.ISINCode")
-
-    payload = {
-    "__RequestVerificationToken": csrf,
-    "Token": token,
-    "TradeType": "Buy",
-
-    "TradeInstrument.ISINCode": isin,
-    "TradeInstrument.ContractCode": contract_code,
-    "TradeInstrument.IsInstrumentUnitTrust": "False",
-
-    "AntiTamperingToken": anti,
-
-    "TradeValue": str(amount),
-
-    "IsLimitOrderAvailable": "True",
-    "IsPlacingLimitOrder": "False",
-
-    "TradeBreakdown.NetAmountDue": str(amount),
-    "HasSufficientFundsToTrade": "True"
-    }
-
-    response = client.session.post(
-    "https://platform.easyequities.io/ValueAllocation/BuyInstruction",
-    data=payload
+    payload = dict(fields)
+    payload.setdefault("TradeInstrument.IsInstrumentUnitTrust", "False")
+    payload.setdefault("IsLimitOrderAvailable", "True")
+    payload.update(
+        {
+            "TradeType": "Buy",
+            "TradeInstrument.ContractCode": contract_code,
+            "TradeValue": f"{amount:.2f}",
+            "IsPlacingLimitOrder": "False",
+            "TradeBreakdown.NetAmountDue": f"{amount:.2f}",
+            "HasSufficientFundsToTrade": "True",
+        }
     )
-    
-    return response
+
+    return client.session.post(f"{client.base_url}/ValueAllocation/BuyInstruction", data=payload)
 
 
-def send_email(body, today, EMAIL_SENDER, EMAIL_RECEIVER, EMAIL_PASSWORD):
+def check_order(response):
+    """
+    Inspect a BuyInstruction response.
+
+    A 200 status alone does not mean the order was placed: the platform
+    re-renders the page with validation messages when it rejects an order.
+
+    Returns:
+        tuple[str, str]: (status, detail) where status is "OK", "FAILED" or
+        "UNCONFIRMED" (200 but the trade form came back, so check the platform).
+    """
+    if response.status_code != 200:
+        return "FAILED", f"HTTP {response.status_code}: {response.text[:300]}"
+
+    content_type = response.headers.get("Content-Type", "")
+    if "json" in content_type:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            for key in ("Success", "IsSuccess", "success", "isSuccess"):
+                if key in body and not body[key]:
+                    return "FAILED", str(body.get("Message") or body.get("message") or body)[:300]
+        return "OK", ""
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    errors = [
+        el.get_text(" ", strip=True)
+        for el in soup.select(
+            ".validation-summary-errors, .field-validation-error, .alert-danger, .error-message"
+        )
+    ]
+    errors = [e for e in errors if e]
+    if errors:
+        return "FAILED", "; ".join(dict.fromkeys(errors))[:300]
+    if soup.find("input", {"name": "AntiTamperingToken"}) is not None:
+        return "UNCONFIRMED", "platform returned the trade form again instead of a confirmation"
+    return "OK", ""
+
+
+def send_email(body, today, EMAIL_SENDER, EMAIL_RECEIVER, EMAIL_PASSWORD, subject=None):
     """
     Send an email with trade results.
 
     Args:
-        body (str): Email body content.
+        body (list[str]): Lines of the email body.
         today (str): Date string to include in the subject line.
         EMAIL_SENDER (str): Sender email address.
         EMAIL_RECEIVER (str): Recipient email address.
         EMAIL_PASSWORD (str): Sender email app password.
+        subject (str): Optional subject override.
 
     Returns:
         None
     """
-    import smtplib
-    from email.mime.text import MIMEText
-
-    subject = f'Easy Equities Buy Orders for {today}'
-    body = "\n".join(body)
-    msg = MIMEText(body)
-    msg["Subject"] = subject
+    msg = MIMEText("\n".join(body))
+    msg["Subject"] = subject or f"Easy Equities Buy Orders for {today}"
     msg["From"] = EMAIL_SENDER
     msg["To"] = EMAIL_RECEIVER
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=REQUEST_TIMEOUT) as server:
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)

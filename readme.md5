@@ -42,4 +42,30 @@ RA_TRADING_ACCOUNT_ID=
 TFSA_TRADING_ACCOUNT_ID=
 EMAIL_SENDER=
 EMAIL_PASSWORD=   ##this is the app password not the normal gmail password
-EMAIL_RECEIVER=
+EMAIL_RECEIVER=```
+
+## ⏰ Running via cron
+
+Use `src/main.py` (not the notebook) on the server. It needs no Jupyter, resolves
+`.env` and `allocations.xlsx` relative to the repo (cron starts in `$HOME`), times out
+hung requests, never runs twice at once, emails you if the run fails, and exits
+non-zero when an order fails.
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# check what would be bought without trading
+.venv/bin/python src/main.py --dry-run
+
+# diagnose an instrument whose orders don't go through (no trade is placed)
+.venv/bin/python src/main.py --inspect EQU.ZA.EASYBF
+```
+
+Example crontab entry (weekdays 10:00, server time):
+
+```
+0 10 * * 1-5 /path/to/easy_equities_bot/.venv/bin/python /path/to/easy_equities_bot/src/main.py >> /path/to/easy_equities_bot/logs/cron.log 2>&1
+```
+
+Logs are written to `logs/bot.log` (rotated). Each order's raw response is saved in
+`logs/orders/` for 30 days. If an order is rejected, look there for the reason.
