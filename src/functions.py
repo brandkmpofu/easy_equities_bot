@@ -1,3 +1,4 @@
+import csv
 import os
 import re
 import smtplib
@@ -5,14 +6,15 @@ from decimal import Decimal, ROUND_DOWN
 from email.mime.text import MIMEText
 from urllib.parse import urljoin
 
-import openpyxl
 from bs4 import BeautifulSoup
 from easy_equities_client.clients import EasyEquitiesClient
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 BASE_URL = "https://platform.easyequities.io"
-DEFAULT_ALLOCATIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "allocations.xlsx")
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_ALLOCATIONS = os.path.join(_SRC_DIR, "allocations.csv")
+LEGACY_ALLOCATIONS = os.path.join(_SRC_DIR, "allocations.xlsx")
 
 # A real browser User-Agent is required — the default python-requests UA
 # is now rejected by CloudFront with a 403 before the request even reaches
@@ -245,24 +247,48 @@ def get_holdings_summary(client, account_id):
     ]
 
 
-def load_allocations(free_cash, file_path=DEFAULT_ALLOCATIONS, sheet_name=0):
-    """
-    Split free cash across the tickers in the allocations spreadsheet.
+def _read_allocation_rows(file_path, sheet_name=0):
+    """Return the allocation sheet as a list of rows, from a .csv or .xlsx file."""
+    if file_path.lower().endswith(".xlsx"):
+        import openpyxl  # only needed for the legacy spreadsheet format
 
-    Amounts are rounded *down* to the cent so their total can never exceed
-    the available cash (rounding to nearest could make the last order fail
-    for insufficient funds).
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            ws = wb.worksheets[sheet_name] if isinstance(sheet_name, int) else wb[sheet_name]
+            return list(ws.iter_rows(values_only=True))
+        finally:
+            wb.close()
+
+    # utf-8-sig drops the BOM Excel adds; the delimiter is sniffed so files
+    # saved with ";" (European Excel locales) work as well as ",".
+    with open(file_path, newline="", encoding="utf-8-sig") as f:
+        text = f.read()
+    try:
+        dialect = csv.Sniffer().sniff(text.split("\n", 1)[0], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    return list(csv.reader(text.splitlines(), dialect))
+
+
+def load_allocations(free_cash, file_path=None, sheet_name=0):
+    """
+    Split free cash across the tickers in the allocations file.
+
+    The file is a CSV with the columns contract_code, ticker, proportion, name
+    (falls back to the legacy allocations.xlsx if no CSV exists). Amounts are
+    rounded *down* to the cent so their total can never exceed the available
+    cash (rounding to nearest could make the last order fail for insufficient
+    funds).
 
     Returns:
         dict: {ticker: {"amount", "contract_code", "ticker_name"}}
     """
+    if file_path is None:
+        file_path = DEFAULT_ALLOCATIONS if os.path.exists(DEFAULT_ALLOCATIONS) else LEGACY_ALLOCATIONS
     try:
-        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-        ws = wb.worksheets[sheet_name] if isinstance(sheet_name, int) else wb[sheet_name]
-        rows = list(ws.iter_rows(values_only=True))
-        wb.close()
+        rows = _read_allocation_rows(file_path, sheet_name)
     except Exception as e:
-        raise ValueError(f"Failed to read Excel file {file_path}: {e}")
+        raise ValueError(f"Failed to read allocations file {file_path}: {e}")
 
     if not rows:
         raise ValueError(f"{file_path} is empty")

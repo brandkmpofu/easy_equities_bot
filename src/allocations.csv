@@ -1,0 +1,5 @@
+contract_code,ticker,proportion,name
+EQU.ZA.STX500,STX500,0.45,Satrix S&P 500 ETF
+EC10.EC.EC10,EC10,0.05,EasyCrypto 10
+EQU.ZA.NEWSLV,NEWSLV,0.05,New Wave Silver ETN
+EQU.ZA.EASYBF,EASYBF,0.45,EasyETFs Balanced Actively Managed ETF
